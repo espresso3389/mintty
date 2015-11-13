@@ -11,6 +11,8 @@
 #define trace_resize(params)
 #endif
 
+void exit_mintty();
+void report_pos();
 void win_reconfig(void);
 
 void win_update(void);
@@ -25,6 +27,7 @@ void win_set_title(char *);
 void win_save_title(void);
 void win_restore_title(void);
 void win_prefix_title(const char *);
+void win_copy_title(void);
 
 colour win_get_colour(colour_i);
 void win_set_colour(colour_i, colour);
@@ -36,6 +39,7 @@ void win_invalidate_all(void);
 void win_set_pos(int x, int y);
 void win_set_chars(int rows, int cols);
 void win_set_pixels(int height, int width);
+void win_set_geom(int y, int x, int height, int width);
 void win_maximise(int max);
 void win_set_zorder(bool top);
 void win_set_iconic(bool);
