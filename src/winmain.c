@@ -1595,13 +1595,16 @@ main(int argc, char *argv[])
   // in order to not suppress signals
   // (indicated by isatty if linked with -mwindows as ttyname() is null)
   bool daemonize = cfg.daemonize && !isatty(0);
+  // disable daemonizing if started from desktop
+  if (invoked_from_shortcut)
+    daemonize = false;
   // disable daemonizing if started from ConEmu
   if (getenv("ConEmuPID"))
     daemonize = false;
   if (daemonize) {  // detach from parent process and terminal
     pid_t pid = fork();
     if (pid < 0)
-      error("could not detach from caller");
+      fprintf(stderr, "Mintty could not detach from caller, starting anyway.\n");
     if (pid > 0)
       exit(0);  // exit parent process
 
