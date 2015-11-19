@@ -43,6 +43,8 @@ bool win_is_fullscreen;
 static bool go_fullscr_on_max;
 static bool resizing;
 static int zoom_token = 0;  // for heuristic handling of Shift zoom (#467, #476)
+static int last_monitor_dpi = 0;
+static bool last_size_aerosnapped = false;
 
 // Options
 static bool title_settable = true;
@@ -108,6 +110,8 @@ load_dwm_funcs(void)
 }
 
 #define dont_debug_dpi
+//#define dont_debug_dpi
+#define debug_dpi
 
 static bool per_monitor_dpi_aware = false;
 
@@ -117,6 +121,7 @@ const int Process_Per_Monitor_DPI_Aware  = 2;
 const int MDT_Effective_DPI = 0;
 static HRESULT (WINAPI * pGetProcessDpiAwareness)(HANDLE hprocess, int * value) = 0;
 static HRESULT (WINAPI * pSetProcessDpiAwareness)(int value) = 0;
+static HRESULT (WINAPI * pGetDpiForMonitor)(HMONITOR hmonitor, int dpiType, UINT * dpiX, UINT * dpiY);
 
 static void
 load_shcore_funcs(void)
@@ -130,6 +135,8 @@ load_shcore_funcs(void)
       (void *)GetProcAddress(shc, "GetProcessDpiAwareness");
     pSetProcessDpiAwareness =
       (void *)GetProcAddress(shc, "SetProcessDpiAwareness");
+    pGetDpiForMonitor =
+      (void *)GetProcAddress(shc, "GetDpiForMonitor");
 #ifdef debug_dpi
       printf("SetProcessDpiAwareness %d GetProcessDpiAwareness %d\n", !!pSetProcessDpiAwareness, !!pGetProcessDpiAwareness);
 #endif
@@ -152,6 +159,40 @@ set_per_monitor_dpi_aware()
       awareness == Process_Per_Monitor_DPI_Aware;
   }
   return false;
+}
+
+
+static bool
+is_resize_by_aerosnap(HWND wnd)
+{
+  // The function works because of the fact that:
+  // When the window is resized by Aero-snap, GetWindowPlacement returns
+  // SW_SHOWNORMAL but wp.rcNormalPosition is not identical to the size
+  // returned by GetWindowRect.
+  WINDOWPLACEMENT wp;
+  wp.length = sizeof(WINDOWPLACEMENT);
+  GetWindowPlacement(wnd, &wp);
+  if (wp.showCmd == SW_SHOWMAXIMIZED)
+    return true;
+  if (wp.showCmd != SW_SHOWNORMAL)
+    return false;
+  RECT rc;
+  GetWindowRect(wnd, &rc);
+  return memcmp(&rc, &wp.rcNormalPosition, sizeof(RECT)) != 0;
+}
+
+static int
+get_monitor_dpi(HWND wnd)
+{
+  if (!pGetDpiForMonitor)
+    return 0;
+  HMONITOR mon = MonitorFromWindow(wnd, MONITOR_DEFAULTTONEAREST);
+  UINT dpiX, dpiY;
+  pGetDpiForMonitor(mon, MDT_Effective_DPI, &dpiX, &dpiY);
+#ifdef debug_dpi
+  printf("get_monitor_dpi: %d\n", dpiX);
+#endif
+  return dpiX;
 }
 
 void
@@ -1064,8 +1105,13 @@ static struct {
       ShowCaret(wnd);
       zoom_token = -4;
     when WM_MOVING:
+      { LPRECT r = (LPRECT) lp;
+      int width = r->right - r->left - extra_width - 2 * PADDING;
+      int height = r->bottom - r->top - extra_height - 2 * PADDING;
+printf("WM_MOVING %dx%d\n", width, height); }
       trace_resize(("# WM_MOVING VK_SHIFT %02X\n", GetKeyState(VK_SHIFT)));
       zoom_token = -4;
+      last_monitor_dpi = get_monitor_dpi(wnd);
     when WM_KILLFOCUS:
       win_show_mouse();
       term_set_focus(false);
@@ -1095,6 +1141,7 @@ static struct {
       LPRECT r = (LPRECT) lp;
       int width = r->right - r->left - extra_width - 2 * PADDING;
       int height = r->bottom - r->top - extra_height - 2 * PADDING;
+printf("WM_SIZING %dx%d\n", width, height);
       int cols = max(1, (float)width / font_width + 0.5);
       int rows = max(1, (float)height / font_height + 0.5);
 
@@ -1120,6 +1167,7 @@ static struct {
       return ew || eh;
     }
     when WM_SIZE: {
+printf("WM_SIZE %dx%d\n", LOWORD(lp), HIWORD(lp));
       trace_resize(("# WM_SIZE (resizing %d) VK_SHIFT %02X\n", resizing, GetKeyState(VK_SHIFT)));
       if (wp == SIZE_RESTORED && win_is_fullscreen)
         clear_fullscreen();
@@ -1156,16 +1204,33 @@ static struct {
       win_update_menus();
       return 0;
     when WM_DPICHANGED:
-#ifdef debug_dpi
-      printf("WM_DPICHANGED %d\n", per_monitor_dpi_aware);
-#endif
       if (per_monitor_dpi_aware) {
         LPRECT r = (LPRECT) lp;
+#ifdef debug_dpi
+        WORD x_dpi = LOWORD(wp);
+        WORD y_dpi = HIWORD(wp);
+        printf("WM_DPICHANGED %d L,T,R,B=%d,%d,%d,%d WxH=%dx%d DPI=%d,%d \n", per_monitor_dpi_aware, r->left, r->top, r->right, r->bottom, r->right - r->left, r->bottom - r->top, x_dpi, y_dpi);
+#endif
+        bool is_aerosnapped = is_resize_by_aerosnap(wnd);
         SetWindowPos(wnd, 0,
           r->left, r->top, r->right - r->left, r->bottom - r->top,
           SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE);
+
+        if (last_size_aerosnapped || is_aerosnapped) {
+          int font_size1 = (font_size * x_dpi + last_monitor_dpi - 1) / last_monitor_dpi;
+          printf("Aero-snapped: DPI: %d -> %d\n", last_monitor_dpi, x_dpi);
+          printf("font_size: %d -> %d\n", font_size, font_size1);
+          win_set_font_size(font_size1, false);
+          last_monitor_dpi = x_dpi;
+          last_size_aerosnapped = is_aerosnapped;
+        }
+        else {
+          last_size_aerosnapped = false;
+        }
+
         win_adapt_term_size(false, true);
 #ifdef debug_dpi
+        printf("font_size: %d\n", font_size);
         printf("SM_CXVSCROLL %d\n", GetSystemMetrics(SM_CXVSCROLL));
 #endif
         return 0;
@@ -1896,6 +1961,7 @@ main(int argc, char *argv[])
       SetWindowPos(wnd, NULL, x, y, width, height,
         SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE);
     }
+    last_monitor_dpi = get_monitor_dpi(wnd);
   }
 
   if (border_style) {
